@@ -1,0 +1,21 @@
+# Only explicitly distributed skill files belong in this repository.
+/*
+!/.gitignore
+!/README.md
+!/SKILL.md
+!/scripts/
+!/assets/
+!/agents/
+/scripts/*
+!/scripts/codex_history.py
+/assets/*
+!/assets/knowledge-card-template.md
+/agents/*
+!/agents/openai.yaml
+__pycache__/
+*.py[cod]
+.env*
+*.jsonl
+*.db
+*.sqlite*
+.codex-history-index.json

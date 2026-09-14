@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex 历史知识库"
+  short_description: "分层同步、检索并沉淀本机 Codex 历史知识与来源"
+  default_prompt: "使用 $search-codex-history 从我的历史知识中查找结论，并在需要时追溯原始会话。"
