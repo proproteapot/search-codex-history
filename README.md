@@ -1,5 +1,17 @@
 # Codex 历史知识库
 
+**一句话：让 Codex 从你过去的聊天中找回结论、方法和产物，并整理成可检索的本地知识库。**
+
+**最快使用：把下面这句话复制给 Codex：**
+
+```text
+请帮我安装这个 skill：https://github.com/proproteapot/search-codex-history 。技能位于仓库根目录，安装名为 search-codex-history。
+```
+
+安装完成后，再发一句：`使用 $search-codex-history，帮我查找以前关于【你的主题】的结论。`
+
+---
+
 把本机 Codex 历史整理成“知识 → 项目 → 来源会话”三层 Markdown，方便找回以前的决定、方法和产物。Python 3.10+，仅使用标准库；不会主动联网上传会话。
 
 脚本负责增量同步、关键词检索和候选筛选。知识卡片由 Codex 或人工审阅后编写，不自动把每段聊天当成知识。
