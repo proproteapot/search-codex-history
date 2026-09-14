@@ -19,3 +19,16 @@ __pycache__/
 *.db
 *.sqlite*
 .codex-history-index.json
+
+!/LICENSE
+!/tests/
+!/examples/
+!/.github/
+/tests/*
+!/tests/test_history.py
+/examples/*
+!/examples/demo.py
+/.github/*
+!/.github/workflows/
+/.github/workflows/*
+!/.github/workflows/tests.yml

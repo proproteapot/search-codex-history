@@ -24,6 +24,19 @@ SESSION_ID_RE = re.compile(
 SPACE_RE = re.compile(r"\s+")
 DATA_URL_RE = re.compile(r"data:[^;\s]+;base64,[A-Za-z0-9+/=\r\n]{256,}")
 MAX_MESSAGE_CHARS = 200_000
+PRIVACY_VERSION = 2
+
+
+def redact(text: str) -> str:
+    """Best-effort filtering, not an anonymization guarantee."""
+    text = re.sub(r"-----BEGIN [^-]*PRIVATE KEY-----.*?(?:-----END [^-]*PRIVATE KEY-----|\Z)", "[已隐藏私钥]", text, flags=re.S)
+    text = re.sub(r"\b(?:gh[pousr]_|github_pat_|sk-)[A-Za-z0-9_-]{16,}", "[已隐藏令牌]", text)
+    text = re.sub(r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/-]+=*", r"\1 [已隐藏]", text)
+    text = re.sub(r"(?i)\b(api[_-]?key|access[_-]?token|password|secret)\b([\s\"']*[:=][\s\"']*)[^\s\"',;]+", r"\1\2[已隐藏]", text)
+    text = re.sub(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", "[已隐藏邮箱]", text)
+    text = re.sub(r"(?<!\d)(?:\+?86[- ]?)?1[3-9]\d{9}(?!\d)", "[已隐藏手机号]", text)
+    text = re.sub(r"(?i)(?:[A-Z]:[\\/](?:Users|Documents and Settings)[\\/]|/(?:Users|home)/)[^\s/\\<>\"']+", "[用户目录]", text)
+    return text
 
 
 @dataclass
@@ -92,6 +105,9 @@ def clean_message(text: Any) -> str:
     if not isinstance(text, str):
         return ""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
+    for tag in ("environment_context", "INSTRUCTIONS", "system", "developer", "app-context", "permissions", "skills_instructions"):
+        text = re.sub(rf"<{tag}\b[^>]*>.*?(?:</{tag}>|\Z)", "", text, flags=re.S | re.I)
+    text = redact(text)
     text = DATA_URL_RE.sub("[已省略内嵌二进制数据]", text).strip()
     if len(text) > MAX_MESSAGE_CHARS:
         text = text[:MAX_MESSAGE_CHARS].rstrip() + "\n\n[内容过长，已在索引镜像中截断]"
@@ -116,6 +132,8 @@ def read_titles(codex_home: Path) -> dict[str, dict[str, str]]:
                 try:
                     item = json.loads(line)
                 except json.JSONDecodeError:
+                    continue
+                if not isinstance(item, dict):
                     continue
                 session_id = str(item.get("id", "")).lower()
                 if session_id:
@@ -227,6 +245,8 @@ def parse_session(path: Path, status: str, title_info: dict[str, dict[str, str]]
             except json.JSONDecodeError:
                 # 正在写入的会话可能暂时留下不完整的最后一行。
                 continue
+            if not isinstance(record, dict):
+                continue
             timestamp = str(record.get("timestamp", ""))
             if timestamp and not first_timestamp:
                 first_timestamp = timestamp
@@ -253,6 +273,8 @@ def parse_session(path: Path, status: str, title_info: dict[str, dict[str, str]]
                     if text:
                         messages.append(("user", text, timestamp))
                 elif event_type == "agent_message":
+                    if payload.get("channel") not in {None, "final", "commentary"}:
+                        continue
                     text = clean_message(payload.get("message") or payload.get("text", ""))
                     if text:
                         messages.append(("assistant", text, timestamp))
@@ -261,6 +283,10 @@ def parse_session(path: Path, status: str, title_info: dict[str, dict[str, str]]
             # 兼容缺少 event_msg 的旧版会话；只有在最终没有事件消息时才采用。
             if record_type == "response_item" and payload.get("type") == "message":
                 role = payload.get("role")
+                if payload.get("recipient") not in {None, "all"}:
+                    continue
+                if role == "assistant" and payload.get("channel") not in {"final", "commentary"}:
+                    continue
                 if role in {"user", "assistant"}:
                     text = content_text(payload.get("content"))
                     if text:
@@ -276,7 +302,7 @@ def parse_session(path: Path, status: str, title_info: dict[str, dict[str, str]]
         deduplicated.append(message)
 
     info = title_info.get(session_id, {})
-    title = info.get("title") or first_line_title(deduplicated)
+    title = clean_message(info.get("title") or first_line_title(deduplicated)) or "未命名会话"
     updated_at = info.get("updated_at") or datetime.fromtimestamp(
         path.stat().st_mtime, tz=timezone.utc
     ).astimezone().isoformat(timespec="seconds")
@@ -346,7 +372,7 @@ def render_markdown(session: Session) -> str:
             "",
         )
     )
-    return "\n".join(lines)
+    return redact("\n".join(lines))
 
 
 def load_manifest(output_dir: Path) -> dict[str, Any]:
@@ -468,14 +494,14 @@ def generate_project_indexes(output_dir: Path, manifest: dict[str, Any]) -> int:
                 f"{meta.get('message_count', 0)} 条消息"
             )
         lines.extend(("", "---", "", f"> 自动更新时间：{iso_now()}", ""))
-        atomic_write_text(destination, "\n".join(lines))
+        atomic_write_text(destination, redact("\n".join(lines)))
         overview_rows.append((project_name, len(sessions), destination))
 
     # 只清理本工具此前生成、但已不再对应任何项目的自动索引。
     for path in project_dir.glob("*.md"):
         if path.name == "项目总览.md":
             continue
-        if path.resolve() not in expected_files:
+        if path.resolve() not in expected_files and not path.is_symlink() and read_frontmatter(path).get("类型") == "项目索引" and read_frontmatter(path).get("自动生成") == "True":
             path.unlink()
 
     overview_path = project_dir / "项目总览.md"
@@ -494,7 +520,7 @@ def generate_project_indexes(output_dir: Path, manifest: dict[str, Any]) -> int:
     for name, count, path in sorted(overview_rows, key=lambda row: (-row[1], row[0].casefold())):
         overview_lines.append(f"- {relative_markdown_link(name, path, overview_path.parent)} · {count} 个会话")
     overview_lines.append("")
-    atomic_write_text(overview_path, "\n".join(overview_lines))
+    atomic_write_text(overview_path, redact("\n".join(overview_lines)))
     return len(overview_rows)
 
 
@@ -506,8 +532,23 @@ def sync_history(
     limit: int | None = None,
     quiet: bool = False,
 ) -> dict[str, Any]:
+    codex_home = codex_home.resolve()
+    output_dir = output_dir.resolve()
+    if not codex_home.is_dir() or not any((codex_home / name).is_dir() for name in ("sessions", "archived_sessions")):
+        raise ValueError("原始会话目录不存在；拒绝同步或清理，请检查 --codex-home。")
+    vault = vault_dir_from_output(output_dir).resolve()
+    if vault == codex_home or codex_home in vault.parents or vault in codex_home.parents:
+        raise ValueError("知识库与 Codex 原始目录不能重叠。")
+    project_output = vault / "项目" / "_自动索引"
+    if vault not in project_output.resolve().parents:
+        raise ValueError("项目索引目录越界。")
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest = load_manifest(output_dir)
+    previous_home = manifest.get("codex_home")
+    if previous_home and previous_home != str(codex_home):
+        raise ValueError("此知识库属于另一个 Codex 目录，请使用独立输出目录。")
+    if manifest.get("privacy_version") != PRIVACY_VERSION:
+        force = True
     items: dict[str, Any] = manifest["items"]
     titles = read_titles(codex_home)
     projects, assignments = read_project_catalog(codex_home)
@@ -527,9 +568,11 @@ def sync_history(
         inferred_id = infer_session_id(path)
         stat = path.stat()
         known = items.get(inferred_id, {})
-        title = titles.get(inferred_id, {}).get("title", "")
+        title = clean_message(titles.get(inferred_id, {}).get("title", ""))
         unchanged = (
             not force
+            and known.get("privacy_version") == PRIVACY_VERSION
+            and Path(str(known.get("output_path", ""))).is_file()
             and known.get("source_path") == str(path)
             and known.get("size") == stat.st_size
             and known.get("mtime_ns") == stat.st_mtime_ns
@@ -545,12 +588,20 @@ def sync_history(
                 session.session_id, session.cwd, projects, assignments
             )
             destination = session_output_path(output_dir, session)
+            if output_dir not in destination.resolve().parents:
+                raise ValueError("输出路径越界")
             rendered = render_markdown(session)
             if not destination.exists() or destination.read_text(encoding="utf-8") != rendered:
                 atomic_write_text(destination, rendered)
+            previous_mirror = Path(str(known.get("output_path", "")))
+            if previous_mirror != destination and previous_mirror.is_file() and not previous_mirror.is_symlink() and output_dir in previous_mirror.resolve().parents:
+                previous_meta = read_frontmatter(previous_mirror)
+                if previous_meta.get("任务ID") == session.session_id and previous_meta.get("类型") == "Codex 历史会话":
+                    previous_mirror.unlink()
             if session.session_id != inferred_id:
                 items.pop(inferred_id, None)
             items[session.session_id] = {
+                "privacy_version": PRIVACY_VERSION,
                 "title": session.title,
                 "status": session.status,
                 "source_path": str(path),
@@ -569,6 +620,29 @@ def sync_history(
         except (OSError, UnicodeError, ValueError) as exc:
             failed.append({"path": str(path), "error": str(exc)})
 
+    removed = 0
+    # Only a full successful scan may remove mirrors owned by this manifest.
+    if limit is None and not failed:
+        current_sources = {str(path.resolve()) for path, _ in files}
+        for session_id, meta in list(items.items()):
+            source = Path(str(meta.get("source_path", ""))).resolve()
+            if str(source) in current_sources or source.exists():
+                continue
+            if not any((codex_home / folder) in source.parents for folder in ("sessions", "archived_sessions")):
+                continue
+            mirror = Path(str(meta.get("output_path", "")))
+            resolved = mirror.resolve()
+            if output_dir not in resolved.parents or mirror.stem != session_id or mirror.is_symlink():
+                continue
+            if mirror.exists():
+                meta_on_disk = read_frontmatter(mirror)
+                if meta_on_disk.get("任务ID") != session_id or meta_on_disk.get("类型") != "Codex 历史会话":
+                    continue
+                mirror.unlink()
+            items.pop(session_id)
+            removed += 1
+    manifest["codex_home"] = str(codex_home)
+    manifest["privacy_version"] = PRIVACY_VERSION
     manifest["project_catalog_hash"] = project_catalog_hash
     save_manifest(output_dir, manifest)
     project_count = generate_project_indexes(output_dir, manifest)
@@ -577,6 +651,7 @@ def sync_history(
         "新增或更新": imported,
         "未变化": skipped,
         "失败": len(failed),
+        "已清理来源": removed,
         "项目索引": project_count,
         "输出目录": str(output_dir),
         "错误": failed,
